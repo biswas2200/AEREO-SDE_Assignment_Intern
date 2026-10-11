@@ -1,3 +1,5 @@
+"""Listing, fetching and downloading certificates, one at a time and as a zip."""
+
 import io
 import zipfile
 from pathlib import Path

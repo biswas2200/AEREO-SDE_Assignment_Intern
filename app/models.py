@@ -1,9 +1,14 @@
-"""SQLAlchemy models for generation jobs and their certificates."""
+"""SQLAlchemy models for generation jobs and their certificates.
+
+A Job is one bulk request. It owns one Certificate row per recipient, created
+up front when the job is submitted, so the job always knows its total and
+every recipient's state can be tracked individually.
+"""
 
 import enum
 import secrets
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from sqlalchemy import Date, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,10 +17,12 @@ from app.database import Base
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    """Current time in UTC. All timestamps in the database are UTC."""
+    return datetime.now(UTC)
 
 
 def new_uuid() -> str:
+    """Random UUID4 as a string, used for job and certificate ids."""
     return str(uuid.uuid4())
 
 
@@ -31,17 +38,21 @@ def new_certificate_code() -> str:
 
 
 class JobStatus(enum.StrEnum):
+    """Lifecycle of a job: PENDING -> PROCESSING -> one of the three final states."""
+
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
-    COMPLETED = "COMPLETED"
-    PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"
-    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"  # every certificate succeeded
+    PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"  # some succeeded, some failed
+    FAILED = "FAILED"  # none succeeded, or the job crashed
 
 
 class CertificateStatus(enum.StrEnum):
+    """Lifecycle of one certificate: PENDING -> SUCCESS or FAILED."""
+
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
+    FAILED = "FAILED"  # invalid recipient data, or PDF generation raised an error
 
 
 class Job(Base):
@@ -53,6 +64,8 @@ class Job(Base):
     issue_date: Mapped[date] = mapped_column(Date)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
 
+    # Counters kept on the job so a status request is a single-row read
+    # instead of counting certificate rows on every poll.
     total: Mapped[int] = mapped_column(Integer, default=0)
     succeeded: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)
@@ -60,9 +73,8 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    certificates: Mapped[list["Certificate"]] = relationship(
-        back_populates="job", cascade="all, delete-orphan"
-    )
+    # Deleting a job also deletes its certificate rows.
+    certificates: Mapped[list["Certificate"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
     @property
     def progress_percent(self) -> float:
@@ -76,15 +88,16 @@ class Certificate(Base):
     __tablename__ = "certificates"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    # Indexed because certificates are almost always looked up by their job.
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
     recipient_name: Mapped[str] = mapped_column(String(200))
     recipient_email: Mapped[str] = mapped_column(String(320))
     course_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     certificate_code: Mapped[str] = mapped_column(String(20), unique=True, default=new_certificate_code)
-    status: Mapped[CertificateStatus] = mapped_column(
-        Enum(CertificateStatus), default=CertificateStatus.PENDING
-    )
+    status: Mapped[CertificateStatus] = mapped_column(Enum(CertificateStatus), default=CertificateStatus.PENDING)
+    # Human-readable reason, set only when status is FAILED.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Location of the generated PDF on disk, set only when status is SUCCESS.
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

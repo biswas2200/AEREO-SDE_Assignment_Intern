@@ -1,3 +1,5 @@
+"""Request-level (422) and per-recipient (FAILED row) validation."""
+
 import pytest
 
 from app import config

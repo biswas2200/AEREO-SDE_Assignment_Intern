@@ -1,3 +1,5 @@
+"""Job submission, status and progress tracking through the API."""
+
 from datetime import datetime, timedelta
 
 from tests.helpers import get_certificates, submit_job

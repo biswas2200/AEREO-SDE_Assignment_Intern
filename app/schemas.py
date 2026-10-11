@@ -5,7 +5,7 @@ structurally wrong (missing fields, wrong types, empty recipient list),
 FastAPI rejects it with 422 before any endpoint code runs.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
@@ -21,7 +21,7 @@ def _as_utc(value: datetime) -> datetime:
     information, so values come back "naive". Marking them as UTC makes the
     API return an explicit offset (e.g. 2026-10-01T10:00:00Z).
     """
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]

@@ -2,8 +2,6 @@
 
 from datetime import date
 
-import pytest
-
 from app.database import SessionLocal
 from app.models import Certificate, CertificateStatus, Job, JobStatus
 from app.services import processor
@@ -27,7 +25,6 @@ def _create_pending_job(recipient_names: list[str]) -> str:
         return job.id
 
 
-@pytest.mark.usefixtures("fresh_database")
 def test_process_job_with_unknown_id_does_nothing():
     processor.process_job("does-not-exist")
 
@@ -35,7 +32,6 @@ def test_process_job_with_unknown_id_does_nothing():
         assert db.query(Job).count() == 0
 
 
-@pytest.mark.usefixtures("fresh_database")
 def test_unexpected_error_marks_job_failed_and_keeps_finished_certificates(monkeypatch):
     job_id = _create_pending_job(["Asha Verma", "Rohan Mehta"])
 

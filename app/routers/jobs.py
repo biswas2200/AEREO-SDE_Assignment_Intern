@@ -1,14 +1,18 @@
-"""Endpoints for submitting generation jobs and following their progress."""
+"""Endpoints for submitting generation jobs and following their progress.
+
+Endpoints are plain `def` functions (not `async def`): FastAPI runs them in a
+thread pool, so blocking database and file work never stalls the event loop.
+"""
 
 import io
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import DbSession
 from app.models import Certificate, CertificateStatus, Job, JobStatus
 from app.schemas import CertificateRead, JobCreate, JobRead
 from app.services.processor import process_job
@@ -16,10 +20,17 @@ from app.services.validator import validate_recipients
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+JOB_NOT_FOUND = "Job not found"
+JOB_STILL_PROCESSING = "Job is still processing, try again once it has finished"
+NO_CERTIFICATES_TO_DOWNLOAD = "No generated certificates are available for this job"
+
 
 @router.post("", response_model=JobRead, status_code=202)
-def create_job(payload: JobCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Store the job with one certificate row per recipient and start generation in the background."""
+def create_job(payload: JobCreate, background_tasks: BackgroundTasks, db: DbSession):
+    """Store the job with one certificate row per recipient and start generation in the background.
+
+    Returns 202 Accepted straight away; poll GET /api/jobs/{job_id} for progress.
+    """
     recipients = validate_recipients(payload.recipients)
 
     job = Job(
@@ -41,25 +52,28 @@ def create_job(payload: JobCreate, background_tasks: BackgroundTasks, db: Sessio
             )
         )
 
-    db.add(job)
+    db.add(job)  # the cascade on Job.certificates saves the certificate rows too
     db.commit()
 
+    # Runs after the response has been sent. Only the id is passed: the task
+    # opens its own session because this request's session will be closed.
     background_tasks.add_task(process_job, job.id)
     return job
 
 
-@router.get("/{job_id}", response_model=JobRead)
-def get_job(job_id: str, db: Session = Depends(get_db)):
+@router.get("/{job_id}", response_model=JobRead, responses={404: {"description": JOB_NOT_FOUND}})
+def get_job(job_id: str, db: DbSession):
+    """Current status, success/failure counters and progress of a job."""
     return _get_job_or_404(db, job_id)
 
 
-@router.get("/{job_id}/certificates", response_model=list[CertificateRead])
-def list_job_certificates(
-    job_id: str,
-    status: CertificateStatus | None = None,
-    db: Session = Depends(get_db),
-):
-    """List a job's certificates, optionally filtered by status (?status=FAILED)."""
+@router.get(
+    "/{job_id}/certificates",
+    response_model=list[CertificateRead],
+    responses={404: {"description": JOB_NOT_FOUND}},
+)
+def list_job_certificates(job_id: str, db: DbSession, status: CertificateStatus | None = None):
+    """List a job's certificates, optionally filtered by status (e.g. ?status=FAILED)."""
     _get_job_or_404(db, job_id)
 
     query = select(Certificate).where(Certificate.job_id == job_id)
@@ -68,12 +82,20 @@ def list_job_certificates(
     return db.scalars(query.order_by(Certificate.created_at)).all()
 
 
-@router.get("/{job_id}/download")
-def download_job_certificates(job_id: str, db: Session = Depends(get_db)):
-    """Download every successfully generated certificate of a finished job as a zip."""
+@router.get(
+    "/{job_id}/download",
+    response_class=Response,
+    responses={
+        200: {"content": {"application/zip": {}}, "description": "Zip of the generated PDFs"},
+        404: {"description": f"{JOB_NOT_FOUND}, or {NO_CERTIFICATES_TO_DOWNLOAD.lower()}"},
+        409: {"description": JOB_STILL_PROCESSING},
+    },
+)
+def download_job_certificates(job_id: str, db: DbSession):
+    """Download every successfully generated certificate of a finished job as one zip."""
     job = _get_job_or_404(db, job_id)
     if job.status in (JobStatus.PENDING, JobStatus.PROCESSING):
-        raise HTTPException(status_code=409, detail="Job is still processing, try again once it has finished")
+        raise HTTPException(status_code=409, detail=JOB_STILL_PROCESSING)
 
     certificates = db.scalars(
         select(Certificate).where(
@@ -81,14 +103,16 @@ def download_job_certificates(job_id: str, db: Session = Depends(get_db)):
             Certificate.status == CertificateStatus.SUCCESS,
         )
     ).all()
+    # Skip any file that has been removed from disk instead of failing the whole zip.
     files = [
         (certificate.certificate_code, Path(certificate.file_path))
         for certificate in certificates
         if certificate.file_path and Path(certificate.file_path).exists()
     ]
     if not files:
-        raise HTTPException(status_code=404, detail="No generated certificates are available for this job")
+        raise HTTPException(status_code=404, detail=NO_CERTIFICATES_TO_DOWNLOAD)
 
+    # Built in memory: each PDF is a few KB, so even 1000 certificates is ~1.4 MB.
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for code, path in files:
@@ -102,7 +126,8 @@ def download_job_certificates(job_id: str, db: Session = Depends(get_db)):
 
 
 def _get_job_or_404(db: Session, job_id: str) -> Job:
+    """Load a job by primary key or stop the request with a 404."""
     job = db.get(Job, job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail=JOB_NOT_FOUND)
     return job

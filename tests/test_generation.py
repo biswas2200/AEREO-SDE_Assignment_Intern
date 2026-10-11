@@ -1,3 +1,5 @@
+"""PDF generation and isolation of individual generation failures."""
+
 from datetime import date
 
 from sqlalchemy import select

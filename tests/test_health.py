@@ -1,3 +1,5 @@
+"""Liveness endpoint."""
+
 def test_health_endpoint_reports_ok(client):
     response = client.get("/health")
 

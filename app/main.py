@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+"""FastAPI application entry point. Run with: uvicorn app.main:app --reload"""
 
 import logging
 from contextlib import asynccontextmanager
@@ -12,8 +12,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Creates missing tables on startup. A real deployment would use migrations.
+async def lifespan(_app: FastAPI):
+    """Code before `yield` runs once at startup, code after it at shutdown."""
+    # Creates any missing tables. A production deployment would use migrations (Alembic).
     Base.metadata.create_all(bind=engine)
     yield
 
@@ -30,4 +31,5 @@ app.include_router(certificates.router)
 
 @app.get("/health", tags=["health"])
 def health() -> dict[str, str]:
+    """Liveness check for load balancers and uptime monitors."""
     return {"status": "ok"}

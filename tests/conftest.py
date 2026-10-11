@@ -1,3 +1,10 @@
+"""Shared pytest fixtures.
+
+Every test runs against a temporary SQLite database (emptied before each test)
+and its own temporary PDF output directory, so tests never touch local data
+and never depend on each other.
+"""
+
 import os
 import shutil
 import tempfile
@@ -23,7 +30,7 @@ def cleanup_test_dir():
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fresh_database(tmp_path, monkeypatch):
     """Empty tables and a per-test PDF output directory, so tests never share state."""
     Base.metadata.drop_all(bind=engine)
@@ -32,8 +39,8 @@ def fresh_database(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(fresh_database):
-    """API client backed by a fresh database.
+def client():
+    """API client for the app (the autouse fresh_database fixture resets state first).
 
     TestClient runs background tasks before the request call returns, so a
     job submitted through this client is fully processed by the time the
@@ -45,6 +52,7 @@ def client(fresh_database):
 
 @pytest.fixture
 def job_payload():
+    """A valid job request with three recipients. Tests modify it as needed."""
     return {
         "event_name": "AEREO Drone Tech Summit 2026",
         "issuer_name": "AEREO Academy",
