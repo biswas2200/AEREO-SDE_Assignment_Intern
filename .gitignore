@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local runtime data
+*.db
+output/
+
+# Environment
+.env
+
+# Assignment brief (not part of the codebase)
+Bulk_Certificate_Generator_Backend_Assignment.docx
