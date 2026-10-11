@@ -2,6 +2,7 @@
 
 from datetime import date
 
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from sqlalchemy import select
 
 from app import config
@@ -62,3 +63,21 @@ def test_one_generation_failure_does_not_stop_other_certificates(client, job_pay
     assert by_name["Rohan Mehta"]["error"] == "Generation failed: simulated rendering error"
     assert by_name["Asha Verma"]["status"] == "SUCCESS"
     assert by_name["Neha Iyer"]["status"] == "SUCCESS"
+
+
+def test_short_text_keeps_the_maximum_font_size():
+    assert generator._fit_font_size("Asha Verma", generator.FONT_BOLD, 40, generator.BODY_TEXT_WIDTH) == 40
+
+
+def test_long_text_is_shrunk_until_it_fits():
+    name = "Maximilian Alexander Christopher Montgomery-Wellington the Third"
+
+    size = generator._fit_font_size(name, generator.FONT_BOLD, 40, generator.BODY_TEXT_WIDTH)
+
+    assert 10 < size < 40
+    assert stringWidth(name, generator.FONT_BOLD, size) <= generator.BODY_TEXT_WIDTH
+    assert stringWidth(name, generator.FONT_BOLD, size + 1) > generator.BODY_TEXT_WIDTH
+
+
+def test_font_size_never_drops_below_the_minimum():
+    assert generator._fit_font_size("x" * 1000, generator.FONT_BOLD, 40, generator.BODY_TEXT_WIDTH) == 10

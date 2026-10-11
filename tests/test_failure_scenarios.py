@@ -314,3 +314,20 @@ def test_job_with_the_maximum_of_1000_recipients(client, job_payload):
     assert job["status"] == "COMPLETED"
     assert (job["succeeded"], job["failed"], job["pending"]) == (1000, 0, 0)
     assert len(_zip_names(client, job_id)) == 1000
+
+
+def test_zip_relies_on_certificate_status_not_on_a_recorded_file(client, job_payload, flaky_generator):
+    flaky_generator(lambda position: position == 2)
+    job_payload["recipients"] = _recipients(3)
+    job_id = submit_job(client, job_payload)
+    [bad] = get_certificates(client, job_id, status="FAILED")
+    good = get_certificates(client, job_id, status="SUCCESS")[0]
+
+    # Simulate a failed certificate that still has a file on record (e.g. a partial write).
+    with SessionLocal() as db:
+        db.get(Certificate, bad["id"]).file_path = str(_file_path(good["id"]))
+        db.commit()
+
+    zip_names = _zip_names(client, job_id)
+    assert len(zip_names) == 2
+    assert f"{bad['certificate_code']}.pdf" not in zip_names
