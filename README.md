@@ -22,6 +22,9 @@ app/
     processor.py        Background job runner
 tests/                  pytest suite (temporary SQLite DB and output dir)
 sample_request.json     Example job with valid and invalid recipients
+pyproject.toml          pytest and coverage settings
+sonar-project.properties  SonarCloud project settings
+.github/workflows/ci.yml  CI: tests, coverage and SonarCloud analysis
 ```
 
 ## Setup
@@ -53,6 +56,12 @@ The API runs on `http://localhost:8000`. Interactive docs (Swagger UI) are at `h
 
 ```bash
 pytest -v
+```
+
+With a coverage report (the suite covers 100% of `app/`):
+
+```bash
+pytest --cov --cov-report=term-missing
 ```
 
 The tests use a temporary SQLite database and a per-test output directory, so they never touch local data. FastAPI's `TestClient` runs background tasks before the request returns, which keeps the tests deterministic without sleeps or polling.
@@ -105,7 +114,7 @@ curl -s -X POST http://localhost:8000/api/jobs -H "Content-Type: application/jso
 
 ```json
 {
-  "id": "b69c0c20-c086-412c-9437-fafa18caab29",
+  "id": "ee39dfb1-3dc5-44f3-9be4-e8e5591c0def",
   "event_name": "AEREO Drone Tech Summit 2026",
   "issuer_name": "AEREO Academy",
   "issue_date": "2026-10-01",
@@ -114,7 +123,7 @@ curl -s -X POST http://localhost:8000/api/jobs -H "Content-Type: application/jso
   "succeeded": 0,
   "failed": 2,
   "progress_percent": 40.0,
-  "created_at": "2026-10-11T19:44:34.550950",
+  "created_at": "2026-10-11T20:06:48.451288Z",
   "completed_at": null
 }
 ```
@@ -133,13 +142,13 @@ curl -s http://localhost:8000/api/jobs/$JOB_ID
 
 ```json
 {
-  "id": "b69c0c20-c086-412c-9437-fafa18caab29",
+  "id": "ee39dfb1-3dc5-44f3-9be4-e8e5591c0def",
   "status": "PARTIALLY_COMPLETED",
   "total": 5,
   "succeeded": 3,
   "failed": 2,
   "progress_percent": 100.0,
-  "completed_at": "2026-10-11T19:44:34.625437",
+  "completed_at": "2026-10-11T20:06:48.486254Z",
   "...": "..."
 }
 ```
@@ -153,19 +162,19 @@ curl -s "http://localhost:8000/api/jobs/$JOB_ID/certificates?status=FAILED"
 ```json
 [
   {
-    "id": "9fec9a6c-c7ee-4140-b5d5-bbbbf4f0ddb8",
+    "id": "97df5a76-3c41-4514-a2b5-6a0f56f44820",
     "recipient_name": "Vikram Singh",
     "recipient_email": "vikram.singh@example",
-    "certificate_code": "CERT-EB434D47",
+    "certificate_code": "CERT-7939-E25B-62A4",
     "status": "FAILED",
     "error": "Invalid email address",
     "...": "..."
   },
   {
-    "id": "38e5f0d3-c3e1-44c5-8f7c-1f63115410ab",
+    "id": "0bd80e97-a851-49fa-b4bb-81e92b3b9a89",
     "recipient_name": "Asha V.",
     "recipient_email": "asha.verma@example.com",
-    "certificate_code": "CERT-5B3CFD48",
+    "certificate_code": "CERT-5F15-3C00-3AA7",
     "status": "FAILED",
     "error": "Duplicate email within this job",
     "...": "..."
@@ -203,7 +212,7 @@ Certificate:  PENDING -> SUCCESS
               FAILED                (set at submission when recipient validation fails)
 ```
 
-`progress_percent` is `(succeeded + failed) / total * 100`, i.e. the share of certificates that reached a final state. Timestamps are stored and returned in UTC.
+`progress_percent` is `(succeeded + failed) / total * 100`, i.e. the share of certificates that reached a final state. Timestamps are stored in UTC and returned with an explicit offset (`...Z`).
 
 ## Validation
 
@@ -214,7 +223,7 @@ Validation happens at two levels.
 **Recipient level (only that recipient fails).** Handled by `services/validator.py`. These are content problems inside an otherwise valid request:
 
 - name is blank after trimming whitespace, or longer than 100 characters
-- email is not in `local@domain.tld` form
+- email is not in `local@domain.tld` form (no spaces, no empty domain labels such as `a@b..com`)
 - email already used by an earlier valid recipient in the same job (case-insensitive)
 
 Each invalid recipient is stored as a `FAILED` certificate with an `error` message, and the rest of the job continues. A single bad row in a 1000-person list should not force the client to resubmit everything, and the failure reasons come back through the same status endpoints as everything else.
@@ -231,9 +240,25 @@ Each invalid recipient is stored as a `FAILED` certificate with an `error` messa
 | Certificate rows | All rows created at submission | `total` is known up front, progress is meaningful from the first poll, and invalid recipients are visible with their reason alongside the generated ones. |
 | Failure isolation | `try/except` around each PDF | One certificate failing (bad data, renderer error) marks only that certificate `FAILED` with the error; the loop moves on. |
 | Template | ReportLab canvas, one fixed landscape A4 layout | Pure Python with no system dependencies (HTML-to-PDF tools need native libraries). Long names and titles are scaled down to fit the page. |
-| Certificate code | `CERT-` + 8 random hex chars, unique column | Short enough to print and read out, random so codes can't be guessed sequentially, and a unique constraint guards against collisions. |
+| Certificate code | `CERT-XXXX-XXXX-XXXX` (48 random bits), unique column | Grouped so it is easy to read off a printed certificate, random so codes can't be guessed sequentially. 48 bits keeps collisions negligible even across millions of certificates (32 bits would make one likely at around 100k); the unique constraint is the final guard. |
 | Storage | PDFs on local disk, path stored in DB | Simple and enough for a single node. The file path is never exposed through the API. |
 | Zip download | Built in memory per request | A certificate is ~2-3 KB, so a 1000-certificate zip is ~1.4 MB. Fine at this size; larger jobs should stream or pre-build the archive. |
+
+## CI and code quality
+
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests:
+
+1. installs `requirements.txt` on Python 3.12
+2. runs the test suite with coverage (`coverage.xml`)
+3. runs a SonarCloud analysis with that coverage report
+
+To connect SonarCloud:
+
+1. Import the repository on [sonarcloud.io](https://sonarcloud.io) and check that the organization and project key match `sonar-project.properties`.
+2. In SonarCloud, turn off **Automatic Analysis** for the project (Administration > Analysis Method). CI-based analysis is needed to upload coverage, and the two cannot run together.
+3. Create a token in SonarCloud and add it to the GitHub repository as the `SONAR_TOKEN` secret (Settings > Secrets and variables > Actions).
+
+Until the secret exists, the SonarCloud step is skipped and CI only runs the tests.
 
 ## Known limitations
 
