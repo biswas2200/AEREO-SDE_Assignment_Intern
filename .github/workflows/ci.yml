@@ -14,18 +14,23 @@ jobs:
     name: Tests and SonarCloud analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      # Actions are pinned to full commit SHAs so a moved tag cannot change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history lets SonarCloud tell new code from old and blame issues correctly.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.lock
 
+      # requirements.lock pins every transitive dependency with hashes, and
+      # --only-binary stops pip from running any package's setup script.
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --require-hashes --only-binary :all: -r requirements.lock
 
       - name: Run tests with coverage
         run: pytest --cov --cov-report=xml --cov-report=term
@@ -38,6 +43,6 @@ jobs:
       # Skipped until the SONAR_TOKEN repository secret is configured.
       - name: SonarCloud scan
         if: steps.sonar.outputs.enabled == 'true'
-        uses: SonarSource/sonarqube-scan-action@v8.3.0
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
