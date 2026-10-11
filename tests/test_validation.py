@@ -93,11 +93,21 @@ def test_validator_rejects_name_over_max_length():
     assert result.error == f"Name must be at most {config.MAX_NAME_LENGTH} characters"
 
 
-@pytest.mark.parametrize("email", ["plainaddress", "missing-at.example.com", "a@b", "a b@example.com", ""])
+@pytest.mark.parametrize(
+    "email",
+    ["plainaddress", "missing-at.example.com", "a@b", "a b@example.com", "", "a@b..com", "a@b.com.", "a@.com"],
+)
 def test_validator_rejects_malformed_emails(email):
     [result] = validate_recipients([RecipientIn(name="Someone", email=email)])
 
     assert result.error == "Invalid email address"
+
+
+@pytest.mark.parametrize("email", ["asha@example.com", "first.last+tag@mail.example.co.in", "a@b.io"])
+def test_validator_accepts_well_formed_emails(email):
+    [result] = validate_recipients([RecipientIn(name="Someone", email=email)])
+
+    assert result.is_valid
 
 
 def test_validator_only_valid_recipients_claim_an_email():
