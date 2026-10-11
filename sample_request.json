@@ -1,0 +1,12 @@
+{
+  "event_name": "AEREO Drone Tech Summit 2026",
+  "issuer_name": "AEREO Academy",
+  "issue_date": "2026-10-01",
+  "recipients": [
+    { "name": "Asha Verma", "email": "asha.verma@example.com", "course_name": "UAV Flight Fundamentals" },
+    { "name": "Rohan Mehta", "email": "rohan.mehta@example.com", "course_name": "Aerial Mapping with Drones" },
+    { "name": "Neha Iyer", "email": "neha.iyer@example.com" },
+    { "name": "Vikram Singh", "email": "vikram.singh@example" },
+    { "name": "Asha V.", "email": "Asha.Verma@example.com" }
+  ]
+}
