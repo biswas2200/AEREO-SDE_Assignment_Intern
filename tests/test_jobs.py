@@ -16,6 +16,8 @@ def test_create_job_returns_202_with_pending_job(client, job_payload):
     assert body["total"] == 3
     assert body["succeeded"] == 0
     assert body["failed"] == 0
+    assert body["pending"] == 3
+    assert body["error"] is None
     assert body["completed_at"] is None
 
 

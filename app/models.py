@@ -38,13 +38,17 @@ def new_certificate_code() -> str:
 
 
 class JobStatus(enum.StrEnum):
-    """Lifecycle of a job: PENDING -> PROCESSING -> one of the three final states."""
+    """Lifecycle of a job: PENDING -> PROCESSING -> one of the final states below.
+
+    A retry moves a finished job back to PENDING.
+    """
 
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"  # every certificate succeeded
     PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"  # some succeeded, some failed
     FAILED = "FAILED"  # none succeeded, or the job crashed
+    HALTED = "HALTED"  # stopped early because too many recent attempts failed; retry resumes it
 
 
 class CertificateStatus(enum.StrEnum):
@@ -53,6 +57,13 @@ class CertificateStatus(enum.StrEnum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"  # invalid recipient data, or PDF generation raised an error
+
+
+class ErrorType(enum.StrEnum):
+    """Why a certificate failed, which decides whether retrying it makes sense."""
+
+    VALIDATION = "VALIDATION"  # bad recipient data: retrying would fail again
+    GENERATION = "GENERATION"  # PDF generation raised: may succeed on retry
 
 
 class Job(Base):
@@ -70,11 +81,19 @@ class Job(Base):
     succeeded: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Job-level explanation when the job was halted or crashed.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Deleting a job also deletes its certificate rows.
     certificates: Mapped[list["Certificate"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+    @property
+    def pending(self) -> int:
+        """Certificates not attempted yet (non-zero while running, or after a halt)."""
+        return self.total - self.succeeded - self.failed
 
     @property
     def progress_percent(self) -> float:
@@ -95,8 +114,9 @@ class Certificate(Base):
     course_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     certificate_code: Mapped[str] = mapped_column(String(20), unique=True, default=new_certificate_code)
     status: Mapped[CertificateStatus] = mapped_column(Enum(CertificateStatus), default=CertificateStatus.PENDING)
-    # Human-readable reason, set only when status is FAILED.
+    # Human-readable reason and its category, set only when status is FAILED.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_type: Mapped[ErrorType | None] = mapped_column(Enum(ErrorType), nullable=True)
     # Location of the generated PDF on disk, set only when status is SUCCESS.
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

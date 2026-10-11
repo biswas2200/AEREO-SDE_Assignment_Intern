@@ -19,3 +19,11 @@ MAX_RECIPIENTS_PER_JOB = 1000
 
 # Longest recipient name that still fits nicely on the certificate.
 MAX_NAME_LENGTH = 100
+
+# Early halt ("circuit breaker"): a job stops once at least HALT_FAILURE_THRESHOLD
+# of its last HALT_WINDOW_SIZE generation attempts failed. A failure rate that
+# high points to a systemic problem (disk full, broken font) rather than bad
+# data, so continuing would only produce more failures. Finished certificates
+# are kept, and POST /api/jobs/{id}/retry resumes the job.
+HALT_WINDOW_SIZE = 20
+HALT_FAILURE_THRESHOLD = 10

@@ -11,7 +11,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from app import config
-from app.models import CertificateStatus, JobStatus
+from app.models import CertificateStatus, ErrorType, JobStatus
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -74,7 +74,9 @@ class JobRead(BaseModel):
     total: int
     succeeded: int
     failed: int
+    pending: int
     progress_percent: float
+    error: str | None = None
     created_at: UtcDatetime
     completed_at: UtcDatetime | None = None
 
@@ -92,4 +94,5 @@ class CertificateRead(BaseModel):
     certificate_code: str
     status: CertificateStatus
     error: str | None = None
+    error_type: ErrorType | None = None
     created_at: UtcDatetime
