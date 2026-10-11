@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from tests.helpers import get_certificates, submit_job
 
 
@@ -60,3 +62,13 @@ def test_get_unknown_job_returns_404(client):
     assert client.get("/api/jobs/does-not-exist").status_code == 404
     assert client.get("/api/jobs/does-not-exist/certificates").status_code == 404
     assert client.get("/api/jobs/does-not-exist/download").status_code == 404
+
+
+def test_timestamps_are_returned_in_utc(client, job_payload):
+    job_id = submit_job(client, job_payload)
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    certificate = get_certificates(client, job_id)[0]
+
+    for value in (job["created_at"], job["completed_at"], certificate["created_at"]):
+        assert datetime.fromisoformat(value).utcoffset() == timedelta(0), value
