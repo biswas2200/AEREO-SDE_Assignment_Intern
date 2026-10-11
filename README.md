@@ -22,6 +22,8 @@ app/
     processor.py        Background job runner
 tests/                  pytest suite (temporary SQLite DB and output dir)
 sample_request.json     Example job with valid and invalid recipients
+requirements.txt        Direct dependencies (pinned)
+requirements.lock       Every transitive dependency, pinned with hashes (used by CI)
 pyproject.toml          pytest and coverage settings
 sonar-project.properties  SonarCloud project settings
 .github/workflows/ci.yml  CI: tests, coverage and SonarCloud analysis
@@ -66,14 +68,17 @@ pytest --cov --cov-report=term-missing
 
 The tests use a temporary SQLite database and a per-test output directory, so they never touch local data. FastAPI's `TestClient` runs background tasks before the request returns, which keeps the tests deterministic without sleeps or polling.
 
+`tests/test_failure_scenarios.py` runs full 500- and 1000-recipient jobs, wrapping the PDF generator so chosen recipients fail while the rest get real PDFs. It covers isolated failures (and that they are left out of the zip), the halt rule, retry, and progress being visible after every certificate. To check that the suite catches real bugs, 23 deliberate bugs were introduced one at a time (e.g. letting one failure stop the job, building the zip from the output folder, an off-by-one in the halt rule). Every one of them makes at least one test fail.
+
 ## API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/jobs` | Submit a generation job. Returns `202 Accepted` with the job. |
-| `GET`  | `/api/jobs/{job_id}` | Job status, counters and `progress_percent`. |
+| `GET`  | `/api/jobs/{job_id}` | Job status, counters (`succeeded`, `failed`, `pending`), `progress_percent` and a job-level `error`. |
 | `GET`  | `/api/jobs/{job_id}/certificates` | All certificates of the job. Optional `?status=PENDING\|SUCCESS\|FAILED`. |
 | `GET`  | `/api/jobs/{job_id}/download` | Zip of every successfully generated PDF. |
+| `POST` | `/api/jobs/{job_id}/retry` | Resume a finished job: regenerate generation failures and unattempted certificates. Returns `202`. |
 | `GET`  | `/api/certificates/{certificate_id}` | Metadata of one certificate. |
 | `GET`  | `/api/certificates/{certificate_id}/download` | The PDF of one certificate. |
 | `GET`  | `/health` | Liveness check. |
@@ -83,7 +88,7 @@ Error responses:
 | Code | When |
 |------|------|
 | `404` | Unknown job or certificate id; the PDF file is missing on disk; a finished job has no successful certificates to zip |
-| `409` | Downloading a certificate that is not `SUCCESS`; downloading a job zip while the job is still `PENDING`/`PROCESSING` |
+| `409` | Downloading a certificate that is not `SUCCESS`; downloading a zip or retrying while the job is still `PENDING`/`PROCESSING`; retrying a job with nothing to retry |
 | `422` | Malformed request (see validation below) |
 
 ### Request body
@@ -122,7 +127,9 @@ curl -s -X POST http://localhost:8000/api/jobs -H "Content-Type: application/jso
   "total": 5,
   "succeeded": 0,
   "failed": 2,
+  "pending": 3,
   "progress_percent": 40.0,
+  "error": null,
   "created_at": "2026-10-11T20:06:48.451288Z",
   "completed_at": null
 }
@@ -147,6 +154,7 @@ curl -s http://localhost:8000/api/jobs/$JOB_ID
   "total": 5,
   "succeeded": 3,
   "failed": 2,
+  "pending": 0,
   "progress_percent": 100.0,
   "completed_at": "2026-10-11T20:06:48.486254Z",
   "...": "..."
@@ -168,6 +176,7 @@ curl -s "http://localhost:8000/api/jobs/$JOB_ID/certificates?status=FAILED"
     "certificate_code": "CERT-7939-E25B-62A4",
     "status": "FAILED",
     "error": "Invalid email address",
+    "error_type": "VALIDATION",
     "...": "..."
   },
   {
@@ -177,6 +186,7 @@ curl -s "http://localhost:8000/api/jobs/$JOB_ID/certificates?status=FAILED"
     "certificate_code": "CERT-5F15-3C00-3AA7",
     "status": "FAILED",
     "error": "Duplicate email within this job",
+    "error_type": "VALIDATION",
     "...": "..."
   }
 ]
@@ -205,14 +215,52 @@ The zip contains one `<certificate_code>.pdf` per successful certificate.
 ```
 Job:          PENDING -> PROCESSING -> COMPLETED            (every certificate succeeded)
                                     -> PARTIALLY_COMPLETED  (some succeeded, some failed)
-                                    -> FAILED               (none succeeded)
+                                    -> FAILED               (none succeeded, or the job crashed)
+                                    -> HALTED               (stopped early: too many recent failures)
+              any finished state --retry--> PENDING
 
 Certificate:  PENDING -> SUCCESS
-              PENDING -> FAILED     (PDF generation raised an error)
-              FAILED                (set at submission when recipient validation fails)
+              PENDING -> FAILED     (error_type GENERATION: PDF generation raised an error)
+              FAILED                (error_type VALIDATION: set at submission)
+              FAILED (GENERATION) --retry--> PENDING
 ```
 
-`progress_percent` is `(succeeded + failed) / total * 100`, i.e. the share of certificates that reached a final state. Timestamps are stored in UTC and returned with an explicit offset (`...Z`).
+`progress_percent` is `(succeeded + failed) / total * 100`, i.e. the share of certificates that reached a final state, and `pending` is `total - succeeded - failed`. Timestamps are stored in UTC and returned with an explicit offset (`...Z`).
+
+## Failure handling
+
+**Isolated failures.** Each PDF is generated inside its own `try/except`. A failure marks only that certificate `FAILED` (`error_type: GENERATION`) and the job moves on. In a 500-certificate job with one failure, the other 499 are generated and delivered. The zip only ever contains certificates whose status is `SUCCESS`, even if a failed attempt left a file on disk. Clients get the exception type in `error` (e.g. `Generation failed (OSError)`); the full message and traceback go to the server log, so internal paths are not exposed.
+
+**Systemic failures: early halt.** If generation keeps failing (disk full, missing font, broken renderer), finishing the job would only add more failures. The processor keeps the outcomes of the last 20 attempts and stops the job as soon as
+
+```
+failures in the last 20 attempts >= 10        (HALT_WINDOW_SIZE = 20, HALT_FAILURE_THRESHOLD = 10)
+```
+
+The job becomes `HALTED` with an explanatory `error`. Certificates that already succeeded are kept and stay downloadable, and the rest stay `PENDING`. How this plays out on a 500-recipient job (each case is a test in `tests/test_failure_scenarios.py`):
+
+| Scenario | Attempts made | Result |
+|----------|---------------|--------|
+| 1 failure (position 250) | 500 | `PARTIALLY_COMPLETED`, 499 in the zip |
+| 2 random failures | 500 | `PARTIALLY_COMPLETED`, 498 in the zip |
+| First 5 fail | 500 | `PARTIALLY_COMPLETED` (5 < 10, below the threshold) |
+| Every third fails (~33%) | 500 | `PARTIALLY_COMPLETED` (at most 7 failures in any 20) |
+| Everything fails | 20 | `HALTED`, 480 never attempted |
+| Only 1 of 500 would pass | 20 | `HALTED` after 20 attempts, no need to wait for all 500 |
+| First 30 pass, then an outage | 40 | `HALTED`; the 30 finished PDFs are kept and downloadable |
+
+The window has to be full before the rule applies, so small jobs and a few early failures never halt a job. Because only recent attempts count, an outage that starts halfway through is detected 10 attempts after it begins. If the threshold is reached on the very last certificate, the job simply finishes with its normal final status.
+
+**Retry.** `POST /api/jobs/{job_id}/retry` resumes a finished job. It moves certificates that failed during generation back to `PENDING` and runs the processor again, which only picks up `PENDING` certificates. Successful certificates are not regenerated, and validation failures are not retried because the same data would fail again. The job-level `error` is cleared and the counters are adjusted.
+
+To see the halt and retry against a real server, point `OUTPUT_DIR` at a regular file so every write fails, submit a job, then restart with a real directory and retry:
+
+```bash
+touch /tmp/not-a-directory
+OUTPUT_DIR=/tmp/not-a-directory uvicorn app.main:app      # submit a job: it ends HALTED after 20 attempts
+uvicorn app.main:app                                        # after restarting with a working OUTPUT_DIR:
+curl -s -X POST http://localhost:8000/api/jobs/$JOB_ID/retry
+```
 
 ## Validation
 
@@ -239,6 +287,9 @@ Each invalid recipient is stored as a `FAILED` certificate with an `error` messa
 | Validation | Two levels (see above) | Malformed requests fail fast with 422; bad individual rows never block the valid ones. |
 | Certificate rows | All rows created at submission | `total` is known up front, progress is meaningful from the first poll, and invalid recipients are visible with their reason alongside the generated ones. |
 | Failure isolation | `try/except` around each PDF | One certificate failing (bad data, renderer error) marks only that certificate `FAILED` with the error; the loop moves on. |
+| Systemic failures | Halt when 10 of the last 20 attempts failed | A sliding window catches both "everything fails from the start" (stops after 20 attempts instead of grinding through the whole job) and "something broke halfway" (stops 10 attempts later). It ignores occasional failures. A failure *rate* over the whole job would react too slowly to a mid-job outage, and a plain consecutive-failure counter would miss a renderer that fails 2 times out of 3. |
+| Retry | Explicit `POST /retry`, resumes from `PENDING` | Retrying straight away inside the job would just hit the same systemic problem again. The client retries once the cause is fixed, and because finished certificates are never touched, a retry costs only the work that is left. |
+| Error details | Exception type to clients, full detail to logs | Raw exception text can contain server paths and other internals. |
 | Template | ReportLab canvas, one fixed landscape A4 layout | Pure Python with no system dependencies (HTML-to-PDF tools need native libraries). Long names and titles are scaled down to fit the page. |
 | Certificate code | `CERT-XXXX-XXXX-XXXX` (48 random bits), unique column | Grouped so it is easy to read off a printed certificate, random so codes can't be guessed sequentially. 48 bits keeps collisions negligible even across millions of certificates (32 bits would make one likely at around 100k); the unique constraint is the final guard. |
 | Storage | PDFs on local disk, path stored in DB | Simple and enough for a single node. The file path is never exposed through the API. |
@@ -248,9 +299,15 @@ Each invalid recipient is stored as a `FAILED` certificate with an `error` messa
 
 `.github/workflows/ci.yml` runs on every push to `main` and on pull requests:
 
-1. installs `requirements.txt` on Python 3.12
+1. installs `requirements.lock` on Python 3.12 with `--require-hashes --only-binary :all:` (every package pinned and verified, no setup scripts run)
 2. runs the test suite with coverage (`coverage.xml`)
 3. runs a SonarCloud analysis with that coverage report
+
+Actions are pinned to full commit SHAs. After changing `requirements.txt`, regenerate the lock file:
+
+```bash
+uv pip compile requirements.txt --generate-hashes --universal --python-version 3.11 -o requirements.lock
+```
 
 To connect SonarCloud:
 
@@ -262,19 +319,17 @@ Until the secret exists, the SonarCloud step is skipped and CI only runs the tes
 
 ## Known limitations
 
-- Background tasks run inside the API process. If the server restarts mid-job, that job stays `PROCESSING`. Its remaining certificates stay `PENDING`, so a resume or retry endpoint could re-run them, but nothing does that automatically yet.
+- Background tasks run inside the API process. If the server restarts mid-job, that job stays `PROCESSING`. The retry endpoint refuses running jobs, because without a heartbeat it cannot tell a dead job from a live one. Such a job can be resumed by calling `process_job(job_id)` directly.
 - PDF generation runs in the API's thread pool, so several very large jobs at once compete with request handling.
 - The built-in Helvetica font covers Latin characters only. Names in other scripts (Devanagari, CJK, etc.) need a registered TTF font.
 - Email validation is a format check only; there is no deliverability or MX check.
 - No authentication or rate limiting. Job ids are random UUIDs, but that is not access control.
 - `GET /api/jobs/{id}/certificates` is not paginated (bounded by the 1000-recipient limit).
 - Tables are created with `create_all`; there are no migrations.
-- Generation error messages are returned to the client as-is.
 
 ## Future scope
 
-- **Celery + Redis workers** so jobs survive restarts, scale across machines and retry transient failures automatically.
-- **Retry endpoint** (`POST /api/jobs/{id}/retry`) to re-run only the `FAILED`/`PENDING` certificates of a job.
+- **Celery + Redis workers** so jobs survive restarts, scale across machines and retry transient failures automatically with backoff. A worker heartbeat would also let interrupted jobs be detected and resumed.
 - **Object storage (S3)** for PDFs, with pre-signed download URLs instead of serving files from the API.
 - **Email delivery** of certificates to recipients once generated.
 - **Authentication** (API keys or JWT) with jobs scoped to the owning organization.
