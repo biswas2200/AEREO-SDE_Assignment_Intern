@@ -1,5 +1,9 @@
 # Bulk Certificate Generator
 
+[![CI](https://github.com/biswas2200/AEREO-SDE_Assignment_Intern/actions/workflows/ci.yml/badge.svg)](https://github.com/biswas2200/AEREO-SDE_Assignment_Intern/actions/workflows/ci.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=biswas2200_AEREO-SDE_Assignment_Intern&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=biswas2200_AEREO-SDE_Assignment_Intern)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=biswas2200_AEREO-SDE_Assignment_Intern&metric=coverage)](https://sonarcloud.io/summary/new_code?id=biswas2200_AEREO-SDE_Assignment_Intern)
+
 A FastAPI backend that generates PDF certificates for many recipients in a single request. A client submits one job with up to 1000 recipients, the API validates each recipient, generates a certificate for every valid one in the background, and exposes endpoints to track progress and download the results individually or as a zip.
 
 **Stack:** Python 3.11+, FastAPI, SQLAlchemy 2.x, SQLite (configurable), Pydantic v2, ReportLab, pytest.
@@ -10,8 +14,8 @@ A FastAPI backend that generates PDF certificates for many recipients in a singl
 app/
   main.py               FastAPI app, router registration, table creation on startup
   config.py             Settings read from environment variables
-  database.py           Engine, session factory, get_db dependency
-  models.py             Job and Certificate tables, status enums
+  database.py           Engine, session factory, SQLite WAL settings, DbSession dependency
+  models.py             Job and Certificate tables, status and error-type enums
   schemas.py            Request/response models (request-level validation)
   routers/
     jobs.py             Submit jobs, poll status, list certificates, zip download
@@ -19,7 +23,7 @@ app/
   services/
     validator.py        Per-recipient validation (name, email, duplicates)
     generator.py        The certificate template, rendered with ReportLab
-    processor.py        Background job runner
+    processor.py        Background job runner, including the early-halt rule
 tests/                  pytest suite (temporary SQLite DB and output dir)
 sample_request.json     Example job with valid and invalid recipients
 requirements.txt        Direct dependencies (pinned)
@@ -44,7 +48,7 @@ pip install -r requirements.txt
 | `DATABASE_URL` | `sqlite:///./certificates.db` | Any SQLAlchemy URL (Postgres needs a driver such as `psycopg`) |
 | `OUTPUT_DIR`   | `./output`                   | Where PDFs are written: `OUTPUT_DIR/<job_id>/<certificate_code>.pdf` |
 
-Tables are created automatically on startup.
+Tables are created automatically on startup. There are no migrations, so after pulling a version that changes the tables, delete the local `certificates.db` (and its `-wal`/`-shm` files) and let the app recreate it.
 
 ## Running the application
 
@@ -52,7 +56,7 @@ Tables are created automatically on startup.
 uvicorn app.main:app --reload
 ```
 
-The API runs on `http://localhost:8000`. Interactive docs (Swagger UI) are at `http://localhost:8000/docs`.
+The API runs on `http://localhost:8000`. Interactive docs (Swagger UI) are at `http://localhost:8000/docs`: expand an endpoint, click **Try it out**, edit the request and click **Execute**. For `POST /api/jobs`, paste the contents of `sample_request.json` as the body. Swagger lists the possible error responses for every endpoint.
 
 ## Running the tests
 
@@ -105,6 +109,15 @@ Error responses:
 }
 ```
 
+| Field | Rules |
+|-------|-------|
+| `event_name`, `issuer_name` | Required, 1-200 characters after trimming |
+| `issue_date` | Required, a real date in `YYYY-MM-DD` form |
+| `recipients` | Required, 1-1000 entries |
+| `recipients[].name` | Required; blank or over 100 characters fails that recipient only |
+| `recipients[].email` | Required; an invalid or duplicate email fails that recipient only |
+| `recipients[].course_name` | Optional, up to 200 characters |
+
 `course_name` is optional per recipient. When it is present the certificate headlines the course and mentions the event underneath; otherwise the event name is the headline.
 
 ## Usage walkthrough
@@ -146,6 +159,8 @@ JOB_ID=$(curl -s -X POST http://localhost:8000/api/jobs -H "Content-Type: applic
 ```bash
 curl -s http://localhost:8000/api/jobs/$JOB_ID
 ```
+
+Repeat until `status` is no longer `PENDING` or `PROCESSING`. A small job like this one finishes almost immediately.
 
 ```json
 {
@@ -210,6 +225,14 @@ curl -o certificates.zip http://localhost:8000/api/jobs/$JOB_ID/download
 
 The zip contains one `<certificate_code>.pdf` per successful certificate.
 
+**6. Retry**
+
+```bash
+curl -s -X POST http://localhost:8000/api/jobs/$JOB_ID/retry
+```
+
+For this job, retry returns `409`: its two failures are validation failures, which a retry would not fix. Retry is meant for generation failures and halted jobs; see [Failure handling](#failure-handling) for a demo.
+
 ## Job and certificate lifecycle
 
 ```
@@ -253,14 +276,33 @@ The window has to be full before the rule applies, so small jobs and a few early
 
 **Retry.** `POST /api/jobs/{job_id}/retry` resumes a finished job. It moves certificates that failed during generation back to `PENDING` and runs the processor again, which only picks up `PENDING` certificates. Successful certificates are not regenerated, and validation failures are not retried because the same data would fail again. The job-level `error` is cleared and the counters are adjusted.
 
-To see the halt and retry against a real server, point `OUTPUT_DIR` at a regular file so every write fails, submit a job, then restart with a real directory and retry:
+To see the halt and retry against a real server, make every PDF write fail by pointing `OUTPUT_DIR` at a regular file instead of a directory:
 
 ```bash
 touch /tmp/not-a-directory
-OUTPUT_DIR=/tmp/not-a-directory uvicorn app.main:app      # submit a job: it ends HALTED after 20 attempts
-uvicorn app.main:app                                        # after restarting with a working OUTPUT_DIR:
-curl -s -X POST http://localhost:8000/api/jobs/$JOB_ID/retry
+OUTPUT_DIR=/tmp/not-a-directory uvicorn app.main:app
 ```
+
+In a second terminal, submit a job with 100 recipients (the halt rule needs at least 20 attempts, so `sample_request.json` is too small), then check it:
+
+```bash
+python3 -c "import json; print(json.dumps({'event_name': 'Outage demo', 'issuer_name': 'AEREO Academy', 'issue_date': '2026-10-01', 'recipients': [{'name': f'Recipient {i}', 'email': f'recipient{i}@example.com'} for i in range(1, 101)]}))" > /tmp/outage_request.json
+JOB_ID=$(curl -s -X POST http://localhost:8000/api/jobs -H "Content-Type: application/json" -d @/tmp/outage_request.json | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+curl -s http://localhost:8000/api/jobs/$JOB_ID
+```
+
+Run the last command again after a second or two: the job is `HALTED` with `failed: 20` and `pending: 80`. Wait until it shows `HALTED` before stopping the server; stopping it mid-run leaves the job `PROCESSING` (see Known limitations). Now "fix the cause": stop the server (Ctrl+C), start it again with the default `OUTPUT_DIR`, and resume the job from the second terminal:
+
+```bash
+uvicorn app.main:app
+```
+
+```bash
+curl -s -X POST http://localhost:8000/api/jobs/$JOB_ID/retry
+curl -s http://localhost:8000/api/jobs/$JOB_ID
+```
+
+The retry returns `202` and the job starts again from `PENDING`. A couple of seconds later, `curl -s http://localhost:8000/api/jobs/$JOB_ID` shows `COMPLETED` with all 100 certificates. Nothing is lost across the restart because all job state is in the database.
 
 ## Validation
 
