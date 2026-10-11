@@ -84,7 +84,7 @@ def test_font_size_never_drops_below_the_minimum():
 
 
 def test_generation_error_does_not_leak_internal_details(client, job_payload, monkeypatch):
-    def fail_with_a_path(certificate, job):
+    def fail_with_a_path(_certificate, _job):
         raise NotADirectoryError("[Errno 20] Not a directory: '/srv/internal/output'")
 
     monkeypatch.setattr(generator, "generate_certificate", fail_with_a_path)
