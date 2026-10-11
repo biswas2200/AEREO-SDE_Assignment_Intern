@@ -94,7 +94,7 @@ def test_one_failure_in_500_still_delivers_the_other_499(client, job_payload, fl
     [bad] = get_certificates(client, job_id, status="FAILED")
     assert bad["recipient_name"] == "Recipient 250"
     assert bad["error_type"] == "GENERATION"
-    assert bad["error"] == "Generation failed: simulated rendering error"
+    assert bad["error"] == "Generation failed (RuntimeError)"
 
     zip_names = _zip_names(client, job_id)
     assert len(zip_names) == 499

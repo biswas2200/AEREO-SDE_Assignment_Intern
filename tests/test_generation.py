@@ -60,7 +60,7 @@ def test_one_generation_failure_does_not_stop_other_certificates(client, job_pay
 
     by_name = {c["recipient_name"]: c for c in get_certificates(client, job_id)}
     assert by_name["Rohan Mehta"]["status"] == "FAILED"
-    assert by_name["Rohan Mehta"]["error"] == "Generation failed: simulated rendering error"
+    assert by_name["Rohan Mehta"]["error"] == "Generation failed (RuntimeError)"
     assert by_name["Asha Verma"]["status"] == "SUCCESS"
     assert by_name["Neha Iyer"]["status"] == "SUCCESS"
 
@@ -81,3 +81,16 @@ def test_long_text_is_shrunk_until_it_fits():
 
 def test_font_size_never_drops_below_the_minimum():
     assert generator._fit_font_size("x" * 1000, generator.FONT_BOLD, 40, generator.BODY_TEXT_WIDTH) == 10
+
+
+def test_generation_error_does_not_leak_internal_details(client, job_payload, monkeypatch):
+    def fail_with_a_path(certificate, job):
+        raise NotADirectoryError("[Errno 20] Not a directory: '/srv/internal/output'")
+
+    monkeypatch.setattr(generator, "generate_certificate", fail_with_a_path)
+
+    job_id = submit_job(client, job_payload)
+    certificate = get_certificates(client, job_id)[0]
+
+    assert certificate["error"] == "Generation failed (NotADirectoryError)"
+    assert "/srv/internal" not in certificate["error"]

@@ -95,7 +95,9 @@ def _generate_one(certificate: Certificate, job: Job) -> bool:
     except Exception as exc:
         logger.exception("Certificate %s failed to generate", certificate.certificate_code)
         certificate.status = CertificateStatus.FAILED
-        certificate.error = f"Generation failed: {exc}"
+        # Only the exception type goes to API clients; the full message and
+        # traceback (which may include server paths) are in the log above.
+        certificate.error = f"Generation failed ({type(exc).__name__})"
         certificate.error_type = ErrorType.GENERATION
         job.failed += 1
         return False
