@@ -7,6 +7,8 @@ venv/
 
 # Local runtime data
 *.db
+*.db-wal
+*.db-shm
 output/
 
 # Environment
