@@ -17,23 +17,28 @@ from app.main import app  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_dir():
+    """Remove the temporary database directory once the whole test session ends."""
     yield
     engine.dispose()
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    """API client backed by a fresh database and a per-test output directory.
+def fresh_database(tmp_path, monkeypatch):
+    """Empty tables and a per-test PDF output directory, so tests never share state."""
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
+
+
+@pytest.fixture
+def client(fresh_database):
+    """API client backed by a fresh database.
 
     TestClient runs background tasks before the request call returns, so a
     job submitted through this client is fully processed by the time the
     test makes its assertions.
     """
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
-
     with TestClient(app) as test_client:
         yield test_client
 
