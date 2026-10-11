@@ -1,0 +1,10 @@
+# Tool configuration only. Dependencies are listed in requirements.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+# Write file paths relative to the repository root so SonarCloud can match
+# coverage.xml entries to the analysed source files.
+relative_files = true
