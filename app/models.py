@@ -20,8 +20,14 @@ def new_uuid() -> str:
 
 
 def new_certificate_code() -> str:
-    """Short, human-readable code printed on the certificate, e.g. CERT-1A2B3C4D."""
-    return f"CERT-{secrets.token_hex(4).upper()}"
+    """Human-readable code printed on the certificate, e.g. CERT-1A2B-3C4D-5E6F.
+
+    48 random bits keep collisions negligible even across millions of
+    certificates (32 bits would make one likely at around 100k). The unique
+    constraint on the column is the final guard.
+    """
+    raw = secrets.token_hex(6).upper()
+    return f"CERT-{raw[:4]}-{raw[4:8]}-{raw[8:]}"
 
 
 class JobStatus(enum.StrEnum):
